@@ -1,0 +1,5 @@
+.daml/
+dist/
+*.dar
+node_modules/
+.vscode/
