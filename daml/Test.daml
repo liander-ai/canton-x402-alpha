@@ -1,0 +1,90 @@
+-- | Daml.Script tests for the x402 paid-alpha settlement. Run with `daml test`.
+module Test where
+
+import Alpha
+import Daml.Script
+import DA.Assert ((===))
+
+data Parties = Parties with
+  bank : Party    -- cash issuer
+  agent : Party   -- the alpha-selling AI agent
+  buyer : Party
+
+allocParties : Script Parties
+allocParties = do
+  bank <- allocateParty "Bank"
+  agent <- allocateParty "Agent"
+  buyer <- allocateParty "Buyer"
+  pure Parties {bank, agent, buyer}
+
+-- | Happy path: buyer pays, agent fills, signal + cash change hands atomically.
+testPaidSignalDelivery : Script ()
+testPaidSignalDelivery = do
+  Parties {bank, agent, buyer} <- allocParties
+
+  -- buyer holds cash; pre-funds a transfer to the agent for the price
+  iouCid <- submit bank do
+    createCmd Iou with issuer = bank, owner = buyer, amount = 25.0
+  payCid <- submit buyer do
+    exerciseCmd iouCid Iou_Transfer with newOwner = agent
+  purchaseCid <- submit buyer do
+    createCmd SignalPurchase with
+      buyer, agent, signalId = "sig-001", price = 25.0
+      cashIssuer = bank, iouTransferCid = payCid
+
+  -- agent fills: reveals the signal and takes payment in one transaction
+  (agentIouCid, signalCid) <- submit agent do
+    exerciseCmd purchaseCid SignalPurchase_Fill with
+      assetSymbol = "BTC", direction = "LONG"
+
+  Some signal <- queryContractId agent signalCid
+  signal.owner === buyer
+  signal.direction === "LONG"
+  signal.assetSymbol === "BTC"
+
+  Some agentIou <- queryContractId agent agentIouCid
+  agentIou.owner === agent
+  agentIou.amount === 25.0
+
+-- | An underpriced payment must not unlock the signal.
+testUnderpaymentFails : Script ()
+testUnderpaymentFails = do
+  Parties {bank, agent, buyer} <- allocParties
+
+  iouCid <- submit bank do
+    createCmd Iou with issuer = bank, owner = buyer, amount = 5.0
+  payCid <- submit buyer do
+    exerciseCmd iouCid Iou_Transfer with newOwner = agent
+  purchaseCid <- submit buyer do
+    createCmd SignalPurchase with
+      buyer, agent, signalId = "sig-002", price = 25.0
+      cashIssuer = bank, iouTransferCid = payCid
+
+  submitMustFail agent do
+    exerciseCmd purchaseCid SignalPurchase_Fill with
+      assetSymbol = "ETH", direction = "SHORT"
+
+-- | Resolving a signal creates a buyer-visible outcome (the track record).
+testTrackRecord : Script ()
+testTrackRecord = do
+  Parties {bank, agent, buyer} <- allocParties
+
+  iouCid <- submit bank do
+    createCmd Iou with issuer = bank, owner = buyer, amount = 25.0
+  payCid <- submit buyer do
+    exerciseCmd iouCid Iou_Transfer with newOwner = agent
+  purchaseCid <- submit buyer do
+    createCmd SignalPurchase with
+      buyer, agent, signalId = "sig-003", price = 25.0
+      cashIssuer = bank, iouTransferCid = payCid
+  (_, signalCid) <- submit agent do
+    exerciseCmd purchaseCid SignalPurchase_Fill with
+      assetSymbol = "SOL", direction = "LONG"
+
+  resolvedCid <- submit agent do
+    exerciseCmd signalCid AlphaSignal_Resolve with outcome = "WIN"
+
+  -- the buyer can see the resolved outcome
+  Some resolved <- queryContractId buyer resolvedCid
+  resolved.outcome === "WIN"
+  resolved.signalId === "sig-003"

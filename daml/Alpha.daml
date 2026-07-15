@@ -1,0 +1,117 @@
+-- | Canton / Daml settlement layer for x402 paid alpha signals.
+--
+-- An AI trading agent sells signed "alpha" signals through paid endpoints
+-- (HTTP 402). Payment settles on Canton: the buyer pays cash and receives the
+-- signal *atomically* — no pay-without-delivery, no deliver-without-payment.
+-- Every purchase is an on-ledger contract the buyer co-observes, so the agent's
+-- track record cannot be quietly edited after the fact = *verifiable alpha*.
+--
+-- Runs standalone via `daml test` (Daml.Script, in-memory ledger) — no node,
+-- no Docker required.
+module Alpha where
+
+-- | Cash IOU (e.g. a tokenized USD / Canton Coin balance). Issuer-signed,
+-- owner-observed, transferred via the canonical propose-accept pattern.
+template Iou
+  with
+    issuer : Party
+    owner : Party
+    amount : Decimal
+  where
+    signatory issuer
+    observer owner
+    ensure amount > 0.0
+
+    choice Iou_Transfer : ContractId IouTransfer
+      with newOwner : Party
+      controller owner
+      do create IouTransfer with iou = this, newOwner
+
+template IouTransfer
+  with
+    iou : Iou
+    newOwner : Party
+  where
+    signatory iou.issuer
+    observer iou.owner, newOwner
+
+    choice IouTransfer_Accept : ContractId Iou
+      controller newOwner
+      do create iou with owner = newOwner
+
+    choice IouTransfer_Cancel : ContractId Iou
+      controller iou.owner
+      do create iou
+
+-- | A buyer's request to purchase a specific alpha signal, pre-funded with a
+-- pending cash transfer to the agent. The buyer authorizes it; the agent fills
+-- it. Filling accepts the payment and issues the signal in one transaction.
+template SignalPurchase
+  with
+    buyer : Party
+    agent : Party
+    signalId : Text
+    price : Decimal
+    cashIssuer : Party
+    iouTransferCid : ContractId IouTransfer
+  where
+    signatory buyer
+    observer agent
+
+    choice SignalPurchase_Fill : (ContractId Iou, ContractId AlphaSignal)
+      with
+        assetSymbol : Text
+        direction : Text
+      controller agent
+      do
+        -- verify the pre-funded payment actually pays the agent, in full,
+        -- in the expected cash, before revealing the signal
+        tf <- fetch iouTransferCid
+        assertMsg "payment must be directed to the agent" (tf.newOwner == agent)
+        assertMsg "payment must cover the listed price" (tf.iou.amount >= price)
+        assertMsg "payment must use the agreed cash issuer" (tf.iou.issuer == cashIssuer)
+        -- atomic: agent takes the cash AND issues the signal to the buyer
+        iouCid <- exercise iouTransferCid IouTransfer_Accept
+        sigCid <- create AlphaSignal with
+          agent, owner = buyer, signalId, assetSymbol, direction, price
+        pure (iouCid, sigCid)
+
+    choice SignalPurchase_Withdraw : ContractId IouTransfer
+      controller buyer
+      do pure iouTransferCid
+
+-- | A delivered, paid-for alpha signal. Signed by the agent, observed by the
+-- buyer. Immutable on-ledger record forming the agent's verifiable track record.
+template AlphaSignal
+  with
+    agent : Party
+    owner : Party
+    signalId : Text
+    assetSymbol : Text
+    direction : Text
+    price : Decimal
+  where
+    signatory agent
+    observer owner
+    ensure direction == "LONG" || direction == "SHORT"
+
+    -- The agent later records the outcome. Because the buyer already co-observes
+    -- the signal, the agent cannot hide that a call was ever made.
+    choice AlphaSignal_Resolve : ContractId ResolvedSignal
+      with outcome : Text
+      controller agent
+      do
+        assertMsg "outcome must be WIN or LOSS" (outcome == "WIN" || outcome == "LOSS")
+        create ResolvedSignal with agent, owner, signalId, direction, outcome
+
+-- | The recorded outcome of a signal — the honest, buyer-visible track record.
+template ResolvedSignal
+  with
+    agent : Party
+    owner : Party
+    signalId : Text
+    direction : Text
+    outcome : Text
+  where
+    signatory agent
+    observer owner

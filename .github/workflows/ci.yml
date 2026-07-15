@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  daml-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Daml SDK
+        run: |
+          curl -sSL https://get.daml.com/ | sh
+          echo "$HOME/.daml/bin" >> "$GITHUB_PATH"
+      - name: Sync daml.yaml to installed SDK
+        run: |
+          VER=$(ls "$HOME/.daml/sdk" | head -1)
+          echo "Installed Daml SDK: $VER"
+          sed -i "s/^sdk-version:.*/sdk-version: $VER/" daml.yaml
+      - name: daml test
+        run: daml test
+
+  ts-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm test

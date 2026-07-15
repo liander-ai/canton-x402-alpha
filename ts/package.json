@@ -1,0 +1,16 @@
+{
+  "name": "canton-x402-alpha-ts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "x402 paid alpha endpoint with Ed25519-signed signals, settled on Canton",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  }
+}
